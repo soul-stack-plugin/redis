@@ -39,10 +39,33 @@ test:
 
 # L1 against a real server. REDIS_ADDR is required on purpose: an integration
 # test that silently skips looks green and proves nothing.
+#
+# The tests refuse to skip, but that only covers a live test that runs and finds
+# no address. It does not cover the live tier going missing — delete or rename
+# the tests and `go test` still prints `ok`, because passing zero tests is a
+# pass. So the count is checked rather than assumed: every TestLive* the tree
+# declares has to appear as a PASS, and the tier is refused outright if the tree
+# declares none.
 l1:
 	@test -n "$(REDIS_ADDR)" || { echo "l1: set REDIS_ADDR=host:port (a server WITH an aclfile)"; exit 1; }
 	@test -n "$(REDIS_ADDR_NO_ACLFILE)" || { echo "l1: set REDIS_ADDR_NO_ACLFILE=host:port (a server WITHOUT one)"; exit 1; }
-	@REDIS_ADDR=$(REDIS_ADDR) REDIS_ADDR_NO_ACLFILE=$(REDIS_ADDR_NO_ACLFILE) go test -tags live -count=1 ./...
+	@declared=$$(go test -tags live -list 'TestLive.*' ./... | grep -c '^TestLive'); \
+	  if [ "$$declared" -eq 0 ]; then \
+	    echo "l1: the tree declares no TestLive* at all — this target would print ok having proved nothing"; \
+	    exit 1; \
+	  fi; \
+	  log=$$(mktemp); \
+	  REDIS_ADDR=$(REDIS_ADDR) REDIS_ADDR_NO_ACLFILE=$(REDIS_ADDR_NO_ACLFILE) \
+	    go test -tags live -count=1 -v ./... > "$$log" 2>&1; rc=$$?; \
+	  cat "$$log"; \
+	  ran=$$(grep -c '^--- PASS: TestLive' "$$log"); \
+	  rm -f "$$log"; \
+	  if [ "$$rc" -ne 0 ]; then exit "$$rc"; fi; \
+	  if [ "$$ran" -ne "$$declared" ]; then \
+	    echo "l1: the tree declares $$declared live tests but $$ran passed — the rest skipped or never ran"; \
+	    exit 1; \
+	  fi; \
+	  echo "l1: $$ran/$$declared live tests ran against real servers"
 
 fmt:
 	@gofmt -w .

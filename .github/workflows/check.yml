@@ -1,7 +1,10 @@
 name: check
 
 on:
+  # Branches are covered by pull_request. A bare `push:` would also fire for
+  # every branch in this repository, running the whole matrix twice per PR.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
