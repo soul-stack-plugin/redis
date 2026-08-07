@@ -1,0 +1,110 @@
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Both architectures run the whole gate, not just a compile. `soul-mod stamp`
+  # and `soul-mod verify` execute the artifact to read its schema back, so a
+  # cross-compiled binary cannot be stamped on a foreign host — each arch has to
+  # do its own (NIM-493). Native runners make that a non-issue and keep QEMU out
+  # of the picture.
+  check:
+    name: check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: gofmt, vet, test, build, stamp, verify
+        run: make check
+
+  # L1 is the tier that matters for this module: the rule diff is built on
+  # Redis' own rendering, and that rendering differs between server versions —
+  # 6.2 returns keys and channels as arrays without their prefixes where 7.x
+  # returns strings with them, and minimises the command set differently again.
+  # A fake cannot prove any of that, so the matrix is over real servers.
+  live:
+    name: L1 (redis ${{ matrix.redis }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        redis: ['6.2-alpine', '7-alpine', '8-alpine']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # Two servers, because persistence is on by default and both of its
+      # outcomes are pinned: one with an `aclfile` where `ACL SAVE` works, one
+      # without where it has to fail loudly instead of reporting success.
+      # The aclfile server needs a directory mounted rather than a single file —
+      # Redis saves ACLs by writing a temporary file and renaming it over the
+      # target, which cannot work across a bind-mounted file.
+      - name: Start two Redis servers
+        run: |
+          mkdir -p /tmp/redis-acl
+          chmod 777 /tmp/redis-acl
+          printf 'port 6379\nsave ""\naclfile /etc/redis/users.acl\n' > /tmp/redis-acl/redis.conf
+          printf 'user default on nopass ~* &* +@all\n' > /tmp/redis-acl/users.acl
+          chmod 666 /tmp/redis-acl/redis.conf /tmp/redis-acl/users.acl
+          docker run -d --name r-aclfile -p 6388:6379 \
+            -v /tmp/redis-acl:/etc/redis \
+            "redis:${{ matrix.redis }}" redis-server /etc/redis/redis.conf
+          docker run -d --name r-plain -p 6387:6379 \
+            "redis:${{ matrix.redis }}" redis-server --save ''
+
+      # A container that has not finished starting looks exactly like a broken
+      # module from the test's side. Wait for both to answer, and if one never
+      # does, print its log rather than letting L1 fail with a connection error
+      # that says nothing about why.
+      - name: Wait for both servers
+        run: |
+          for spec in r-aclfile:6388 r-plain:6387; do
+            name="${spec%%:*}"
+            port="${spec##*:}"
+            up=""
+            for _ in $(seq 1 30); do
+              if docker exec "$name" redis-cli -p 6379 ping 2>/dev/null | grep -q PONG; then
+                up=yes
+                break
+              fi
+              sleep 1
+            done
+            if [ -z "$up" ]; then
+              echo "$name on $port never answered PING"
+              docker logs "$name" || true
+              exit 1
+            fi
+            echo "$name is up on $port"
+          done
+
+      - name: L1
+        run: make l1 REDIS_ADDR=127.0.0.1:6388 REDIS_ADDR_NO_ACLFILE=127.0.0.1:6387
+
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          docker logs r-aclfile || true
+          docker logs r-plain || true

@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # One job per architecture on a native runner. `soul-mod stamp` reads the
+  # schema back out of the artifact by running it, so a cross-compiled binary
+  # cannot be stamped elsewhere (NIM-493) — each arch stamps its own.
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build and stamp
+        run: make build
+
+      # An unstamped artifact carries no disclosure, and a Keeper that cannot
+      # read the disclosure fails closed rather than approving blind. Verify
+      # before the bytes leave the runner, not after.
+      - name: Verify the stamp
+        run: make verify
+
+      - name: Name the artifact and hash it
+        run: |
+          bin="soul-mod-redis-linux-${{ matrix.arch }}"
+          mv dist/soul-mod-redis "$bin"
+          sha256sum "$bin" > "$bin.sha256"
+          cat "$bin.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soul-mod-redis-linux-${{ matrix.arch }}
+          path: |
+            soul-mod-redis-linux-${{ matrix.arch }}
+            soul-mod-redis-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+
+      # The schema document is derived from Go values and carries nothing about
+      # the platform — the two architectures produce it byte for byte identical.
+      # Publish it once, from amd64, so `soul-lint` can check a destiny without
+      # downloading an artifact for an architecture it does not care about.
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'amd64'
+        with:
+          name: schema
+          path: dist/schema.json
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # The two architectures agree on the schema by construction, but "by
+      # construction" is what a release is supposed to check rather than assume:
+      # a mismatch here means the two binaries do not describe the same module.
+      - name: Both architectures must describe the same module
+        run: |
+          ls -l assets
+          for arch in amd64 arm64; do
+            test -s "assets/soul-mod-redis-linux-$arch" || { echo "missing artifact for $arch"; exit 1; }
+            (cd assets && sha256sum -c "soul-mod-redis-linux-$arch.sha256")
+          done
+          test -s assets/schema.json
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            assets/soul-mod-redis-linux-amd64 \
+            assets/soul-mod-redis-linux-amd64.sha256 \
+            assets/soul-mod-redis-linux-arm64 \
+            assets/soul-mod-redis-linux-arm64.sha256 \
+            assets/schema.json \
+            --clobber
