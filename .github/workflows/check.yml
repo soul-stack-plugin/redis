@@ -56,13 +56,22 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # Two servers, because persistence is on by default and both of its
-      # outcomes are pinned: one with an `aclfile` where `ACL SAVE` works, one
-      # without where it has to fail loudly instead of reporting success.
-      # The aclfile server needs a directory mounted rather than a single file —
-      # Redis saves ACLs by writing a temporary file and renaming it over the
-      # target, which cannot work across a bind-mounted file.
-      - name: Start two Redis servers
+      # Three servers.
+      #
+      # Persistence is on by default in both modules and both of its outcomes are
+      # pinned: `r-aclfile` is started from a config file AND with an aclfile, so
+      # `CONFIG REWRITE` and `ACL SAVE` both work; `r-plain` has neither, so both
+      # have to fail loudly instead of reporting a durability they cannot
+      # deliver. The aclfile server needs a directory mounted rather than a
+      # single file — Redis saves ACLs by writing a temporary file and renaming
+      # it over the target, which cannot work across a bind-mounted file.
+      #
+      # `r-62` is pinned to 6.2 whatever the matrix is running, because the
+      # `config` module has to be exercised against a server with no
+      # multi-parameter CONFIG SET on every leg. When the matrix itself is 6.2
+      # the two are the same version, which is fine — the tests compare what the
+      # servers report, not what the matrix says.
+      - name: Start three Redis servers
         run: |
           mkdir -p /tmp/redis-acl
           chmod 777 /tmp/redis-acl
@@ -74,14 +83,16 @@ jobs:
             "redis:${{ matrix.redis }}" redis-server /etc/redis/redis.conf
           docker run -d --name r-plain -p 6387:6379 \
             "redis:${{ matrix.redis }}" redis-server --save ''
+          docker run -d --name r-62 -p 6386:6379 \
+            redis:6.2-alpine redis-server --save ''
 
       # A container that has not finished starting looks exactly like a broken
       # module from the test's side. Wait for both to answer, and if one never
       # does, print its log rather than letting L1 fail with a connection error
       # that says nothing about why.
-      - name: Wait for both servers
+      - name: Wait for the servers
         run: |
-          for spec in r-aclfile:6388 r-plain:6387; do
+          for spec in r-aclfile:6388 r-plain:6387 r-62:6386; do
             name="${spec%%:*}"
             port="${spec##*:}"
             up=""
@@ -101,10 +112,15 @@ jobs:
           done
 
       - name: L1
-        run: make l1 REDIS_ADDR=127.0.0.1:6388 REDIS_ADDR_NO_ACLFILE=127.0.0.1:6387
+        run: |
+          make l1 REDIS_ADDR=127.0.0.1:6388 \
+                  REDIS_ADDR_62=127.0.0.1:6386 \
+                  REDIS_ADDR_NO_ACLFILE=127.0.0.1:6387 \
+                  REDIS_ADDR_NOFILE=127.0.0.1:6387
 
       - name: Server logs on failure
         if: failure()
         run: |
           docker logs r-aclfile || true
+          docker logs r-62 || true
           docker logs r-plain || true

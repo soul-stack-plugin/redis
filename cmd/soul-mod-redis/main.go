@@ -15,15 +15,16 @@ package main
 
 import (
 	"github.com/soul-stack-plugin/redis/internal/acl"
+	"github.com/soul-stack-plugin/redis/internal/config"
 	"github.com/souls-guild/soul-stack/sdk/module"
 )
 
 // bundle is a named value rather than a literal inside the call so a test can
-// validate the exact thing main serves. `config` and `info` join the list here
-// when they exist, and nothing else about the artifact changes.
+// validate the exact thing main serves. `info` joins the list here when it
+// exists, and nothing else about the artifact changes.
 var bundle = module.Bundle{
 	Compat:  module.Compat{Keeper: ">=0.9 <2.0"},
-	Modules: []module.Def{acl.Module},
+	Modules: []module.Def{acl.Module, config.Module},
 }
 
 func main() { module.ServeBundle(bundle) }

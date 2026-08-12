@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/souls-guild/soul-stack/sdk/module"
@@ -47,21 +48,62 @@ func TestSchemaSubcommandPrintsACanonicalDocument(t *testing.T) {
 }
 
 // Which module runs decides which host gets changed, so an artifact asked for a
-// module it does not serve must refuse — never fall through to the only one it
-// has. `redis` is the argument to guard against by name: it is the registration
-// alias an operator sees everywhere, and it is not a module.
-func TestUnknownModuleDoesNotFallThroughToTheOnlyOne(t *testing.T) {
-	for _, name := range []string{"redis", "config", "info", "present", ""} {
+// module it does not serve must refuse — never fall through to one it has.
+// `redis` is the argument to guard against by name: it is the registration alias
+// an operator sees everywhere, and it is not a module.
+//
+// The refusal is asserted on the REASON, not on the exit code. A known module
+// also exits non-zero here, because serving it needs a socket this test does not
+// provide — so an exit-code-only assertion keeps passing after a name moves from
+// unknown to known, and silently stops testing anything. That already happened
+// once: `config` sat in this list, became a real module, and the test stayed
+// green.
+func TestUnknownModuleDoesNotFallThroughToAKnownOne(t *testing.T) {
+	known := map[string]bool{}
+	for _, def := range bundle.Modules {
+		known[def.Name] = true
+	}
+
+	for _, name := range []string{"redis", "acl-config", "info", "present", "Acl", ""} {
+		if known[name] {
+			t.Fatalf("%q is a module this artifact serves — it cannot stand in for an unknown name", name)
+		}
 		var stdout, stderr bytes.Buffer
 		var args []string
 		if name != "" {
 			args = []string{name}
 		}
-		if code := module.ServeBundleArgs(bundle, args, &stdout, &stderr); code == 0 {
+		code := module.ServeBundleArgs(bundle, args, &stdout, &stderr)
+		if code == 0 {
 			t.Errorf("argv %q was accepted; this artifact serves only the modules it declares", name)
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("argv %q wrote to stdout: %q", name, stdout.String())
+		}
+		// An empty argv is the "which module?" case and reports itself as such;
+		// everything else has to be refused by name.
+		want := "unknown module"
+		if name == "" {
+			want = "missing module name"
+		}
+		if got := stderr.String(); !strings.Contains(got, want) {
+			t.Errorf("argv %q was rejected for the wrong reason: want %q in stderr, got %q", name, want, got)
+		}
+	}
+}
+
+// The other half of the same property: a module the artifact DOES serve must not
+// be turned away as unknown. Without this, dropping a module from the bundle
+// would leave the test above green and no test red.
+func TestDeclaredModulesAreNotRefusedAsUnknown(t *testing.T) {
+	if len(bundle.Modules) == 0 {
+		t.Fatal("the bundle serves no modules")
+	}
+	for _, def := range bundle.Modules {
+		var stdout, stderr bytes.Buffer
+		module.ServeBundleArgs(bundle, []string{def.Name}, &stdout, &stderr)
+		if got := stderr.String(); strings.Contains(got, "unknown module") {
+			t.Errorf("module %q is declared in the bundle but the dispatcher does not know it: %s", def.Name, got)
 		}
 	}
 }

@@ -1,6 +1,6 @@
 # soul-mod-redis
 
-A module bundle for Redis. One artifact, one approval, one signature — today it serves the `acl` module, and `config` and `info` join it by being added to `internal/` and named in `cmd/soul-mod-redis/main.go`.
+A module bundle for Redis. One artifact, one approval, one signature — today it serves `acl` and `config`, and `info` joins them by being added to `internal/` and named in `cmd/soul-mod-redis/main.go`.
 
 A SoulModule plugin for Soul Stack, built on `sdk/module` over the gRPC-stdio handshake (ADR-020).
 
@@ -121,6 +121,101 @@ register:
     persisted: true
 ```
 
+## The `config` module
+
+- `present` — the named runtime parameters hold the requested values. Writes only when something actually differs.
+- `read` — reads parameters into the register. A pure read; never reports a change.
+
+### What this does that driving `redis-cli` does not
+
+**The verdict comes from the server, not from comparing strings.** Redis stores a normalised form and hands *that* back:
+
+```
+you write:    maxmemory: 100mb        Redis stores: 104857600
+you write:    notify-keyspace-events: KEA   Redis stores: AKE
+you write:    appendfsync: EVERYSEC   Redis stores: everysec
+```
+
+and the multipliers are not the ones anyone guesses — `1k` is 1000 while `1kb` is 1024. A module that compares what you asked for against what is stored reports a change on every single run. This one canonicalises **only to decide whether a write is worth attempting**, then re-reads and takes `changed` from the before/after values the server itself produced. A canonicalisation miss costs one redundant `CONFIG SET`; it cannot produce a false "changed".
+
+Case is deliberately **not** folded, even though it would save a write on `appendfsync`: in `notify-keyspace-events`, `K` and `k` mean different things.
+
+**The write is atomic where the server supports it.** Redis 7.0+ applies a multi-parameter `CONFIG SET` all-or-nothing. Redis 6.2 rejects the form outright, having applied nothing, so the module falls back to one write per parameter — not atomic, and the output says `atomic: false` rather than pretending. `require_atomic: true` fails instead of falling back. A rejection that is *not* about arity — a bad value, an immutable parameter — never triggers the fallback: the server already rolled the whole command back, and retrying one by one would apply the half it refused as a unit.
+
+**An unknown parameter is a failure, not a silent skip.** `CONFIG GET` answers nothing for a parameter the server does not have, and the parameter set differs a lot between versions — 169 on 6.2, 202 on 7.4, 302 on 8.
+
+### Parameters
+
+| parameter | type | required | notes |
+|---|---|---|---|
+| `host` / `port` / `db` | string / int / int | host only | configuration is server-wide; `db` only selects the connection's db |
+| `login_username` / `login_password` | string | no | needs `config\|get` and `config\|set`; `+@read` is not enough. Password must be a vault-ref |
+| `tls_enable` / `tls_ca_path` / `tls_skip_verify` | bool / string / bool | no | |
+| `timeout_seconds` | int | no | default 10 |
+| `settings` | map | **yes** | parameter name → desired value |
+| `persist` | bool | no | **default true** — `CONFIG REWRITE` after a change |
+| `allow_connectivity_change` | bool | no | default false; see Gates |
+| `require_atomic` | bool | no | default false |
+
+`read` takes the connection parameters plus `patterns` (glob list, default `["*"]`) and `reveal_secrets` (default false).
+
+### Gates
+
+`allow_connectivity_change` refuses the parameters that can cut the path the module manages the server through — `port`, `bind`, `protected-mode`, `requirepass`, `maxclients`, the `tls-*` material. This is not theoretical:
+
+- `CONFIG SET port` moves the listener and the connection that issued it never gets a reply.
+- `protected-mode yes` makes every later command from a non-loopback client fail with `DENIED` — **including the one that would turn it back off**. Recovering needs a restart.
+
+`CONFIG GET requirepass` returns the password in the clear. `requirepass`, `masterauth`, `tls-key-file-pass` and `tls-client-key-file-pass` are withheld from the output as `(redacted)`; a password change is still reported as a change, only the two values are hidden. `read` withholds them too unless `reveal_secrets: true` — the register is not a secret store.
+
+### Persistence — what `persist` converges and what it does not
+
+The module converges the **runtime**. It reads `CONFIG GET` and writes `CONFIG SET`, and never reads the server's configuration file. So a value someone set by hand without saving is invisible to it: the runtime is correct, the module reports no change, and the value reverts on the next restart. If the file itself must be the source of truth, render the file and restart the server — that is a different job.
+
+`persist: true` issues `CONFIG REWRITE` after a change. A server started **without a config file** has nowhere to write and the step **fails** rather than reporting a durability it cannot deliver; the message says the values *are* applied in memory, because they are. Redis rewrites the file under its own uid and reformats it — a multi-pair `save` comes back one directive per line — so the file's owner and mode afterwards are Redis' business, not this module's.
+
+### Usage
+
+```yaml
+- name: Tune the cache
+  module: redis.config.present
+  params:
+    host: cache-01.internal
+    login_username: admin
+    login_password: vault:secret/data/redis#admin_password
+    settings:
+      maxmemory: 100mb
+      maxmemory-policy: allkeys-lru
+      appendfsync: everysec
+
+- name: What is this server running with?
+  module: redis.config.read
+  params:
+    host: cache-01.internal
+    patterns: ["maxmemory*", "appendonly"]
+  register: redis_cfg
+```
+
+### Output
+
+```yaml
+register:
+  redis_config_result:
+    action: altered | noop
+    changes: "maxmemory: 0 -> 104857600"
+    changed_parameters: [maxmemory]
+    persisted: true
+    atomic: true
+```
+
+`read` registers `config` (name → value), `count` and `redacted`.
+
+### Dry-run
+
+`config` implements `Plan` and declares `PlanReadSafe` (ADR-031): drift is determined with `CONFIG GET` and nothing else. Its answer matches Apply's up to canonicalisation — a value stored in a form the module cannot predict shows as drift in Plan and as a no-op in Apply. The error is one-directional on purpose: Plan may over-report a change, never under-report one.
+
+`acl` deliberately does **not** declare the marker. Its rule diff has to push the desired rules through a scratch user, which is a write, so it takes default-deny on dry-run rather than claiming a purity it does not have.
+
 ## Layout
 
 ```
@@ -128,6 +223,9 @@ cmd/soul-mod-redis/main.go   the bundle: compat window + the list of modules
 internal/acl/def.go          what the `acl` module offers — the schema source
 internal/acl/acl.go          what it does
 internal/acl/client.go       the go-redis adapter
+internal/config/def.go       what the `config` module offers
+internal/config/config.go    what it does
+internal/config/client.go    its go-redis adapter
 ```
 
 A second module is `internal/<name>/` with its own `def.go` plus one entry in `main.go`. Nothing else changes: not the artifact name, not the registration, not the signature.
@@ -156,27 +254,32 @@ The bundle SDK landed on the core's `release/R5` and has not reached its `main` 
 
 ## Tests
 
-- **L0** (`internal/acl/acl_test.go`) — fake client, no server. Covers create / no-op under a differing server rendering / rule-order drift / password compare and rotation / selector drift / scratch-user lifecycle / the three lockout gates / parameter validation. `make test`.
+- **L0** (`internal/acl/acl_test.go`, `internal/config/config_test.go`) — fake client, no server. `acl` covers create / no-op under a differing server rendering / rule-order drift / password compare and rotation / selector drift / scratch-user lifecycle / the three lockout gates. `config` covers no-op vs real change / a memory unit that only *looks* different / a normalisation the module cannot predict / the atomic and fallback write paths / the persistence outcomes / redaction / the connectivity gate. Both fakes render **differently from their input** on purpose: a fake that echoes what it is given makes every idempotence test pass by construction. `make test`.
 
-- **Guards** (`internal/acl/def_test.go`, `cmd/soul-mod-redis/bundle_test.go`) — on the description rather than on the behaviour, because the description and the implementation are two declarations of one contract and nothing in the language ties them together. Every state `def.go` declares must be one `Apply` serves; the bundle must validate and print a canonical document, or `soul-mod stamp` refuses it at build time; and an artifact asked for a module it does not serve must refuse rather than fall through to the only one it has.
+- **Guards** (`internal/*/def_test.go`, `cmd/soul-mod-redis/bundle_test.go`) — on the description rather than on the behaviour, because the description and the implementation are two declarations of one contract and nothing in the language ties them together. Every state `def.go` declares must be one `Apply` serves; every output key `Apply` emits must be one `def.go` declares, or a scenario's `register:` reads a field nobody documented; the bundle must validate and print a canonical document, or `soul-mod stamp` refuses it at build time; and an artifact asked for a module it does not serve must refuse **by name** rather than fall through to one it has.
 
-- **L1** (`internal/acl/live_test.go`, build tag `live`) — a real server. These are the ones that matter: the diff is built on Redis' own rendering, and a fake cannot prove the rendering behaves as assumed.
+  That last guard asserts the *reason* and not the exit code, which it learned the hard way: a known module also exits non-zero without a socket, so the original exit-code check kept passing after `config` moved from "unknown name to reject" to a real module — and silently stopped testing anything.
 
-  Two servers are needed, because persistence is on by default and both of its outcomes are worth pinning: one with an `aclfile` where `ACL SAVE` works, one without where it must fail loudly.
+- **L1** (`internal/*/live_test.go`, build tag `live`) — real servers. These are the ones that matter: both modules are built on what Redis actually stores, and a fake cannot prove the storing behaves as assumed.
+
+  Four addresses, because every persistence outcome is worth pinning and version drift is the point:
 
   ```sh
-  mkdir -p /tmp/redis-acl && chmod 777 /tmp/redis-acl
-  printf 'port 6379\nsave ""\naclfile /etc/redis/users.acl\n' > /tmp/redis-acl/redis.conf
-  printf 'user default on nopass ~* &* +@all\n' > /tmp/redis-acl/users.acl
-  chmod 666 /tmp/redis-acl/*
-  docker run -d --rm --name r-aclfile -p 6388:6379 -v /tmp/redis-acl:/etc/redis \
-      redis:7-alpine redis-server /etc/redis/redis.conf
-  docker run -d --rm --name r-plain   -p 6387:6379 redis:7-alpine redis-server --save ''
+  D=/tmp/redis-l1 && mkdir -p $D && chmod 777 $D
+  printf 'port 6379\nmaxmemory 0\naclfile /etc/redis/users.acl\n' > $D/redis.conf
+  : > $D/users.acl && chmod 666 $D/*
+  docker run -d --rm --name r-full -p 6387:6379 -v $D:/etc/redis \
+      redis:7.4 redis-server /etc/redis/redis.conf
+  docker run -d --rm --name r-62   -p 6386:6379 redis:6.2
+  docker run -d --rm --name r-bare -p 6389:6379 redis:7.4
 
-  REDIS_ADDR=127.0.0.1:6388 REDIS_ADDR_NO_ACLFILE=127.0.0.1:6387 make l1
+  make l1 REDIS_ADDR=127.0.0.1:6387 REDIS_ADDR_62=127.0.0.1:6386 \
+          REDIS_ADDR_NO_ACLFILE=127.0.0.1:6389 REDIS_ADDR_NOFILE=127.0.0.1:6389
   ```
 
-  Both variables are required rather than defaulted — an integration test that silently skips looks green and proves nothing. CI runs this tier against Redis 6.2, 7 and 8 on every push, because the rendering the diff is built on is exactly what changes between those versions.
+  `r-full` has both a config file and an aclfile, so `CONFIG REWRITE` and `ACL SAVE` both work; `r-bare` has neither, so both must fail loudly; `r-62` is where the multi-parameter `CONFIG SET` does not exist and the `ACL GETUSER` reply has a different shape. Every variable is required rather than defaulted — an integration test that silently skips looks green and proves nothing. CI runs this tier against Redis 6.2, 7 and 8 on every push, because what changes between those versions is exactly what both modules are built on.
+
+  Durability is checked by **restarting the server**, not by trusting the `persisted` flag the module set itself.
 
 ## Releases
 

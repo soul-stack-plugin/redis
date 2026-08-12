@@ -37,12 +37,30 @@ verify:
 test:
 	@go test -count=1 ./...
 
-# L1 against a real server. REDIS_ADDR is required on purpose: an integration
+# L1 against real servers. Every address is required on purpose: an integration
 # test that silently skips looks green and proves nothing.
+#
+#   REDIS_ADDR            a modern server (7.x/8) started WITH a config file AND
+#                         an aclfile — `acl` needs the second to run ACL SAVE,
+#                         `config` needs the first to run CONFIG REWRITE
+#   REDIS_ADDR_62         a Redis 6.2 server: no multi-parameter CONFIG SET, a
+#                         different reply shape for ACL GETUSER, a smaller
+#                         parameter set. It needs no config file and no aclfile —
+#                         what is tested against it is the write path and the
+#                         version's own limits
+#   REDIS_ADDR_NO_ACLFILE a server with no aclfile, so ACL SAVE fails
+#   REDIS_ADDR_NOFILE     a server started with no config file, so CONFIG
+#                         REWRITE fails. One server can serve both of the last
+#                         two: what matters is that neither save has anywhere to
+#                         write.
 l1:
-	@test -n "$(REDIS_ADDR)" || { echo "l1: set REDIS_ADDR=host:port (a server WITH an aclfile)"; exit 1; }
-	@test -n "$(REDIS_ADDR_NO_ACLFILE)" || { echo "l1: set REDIS_ADDR_NO_ACLFILE=host:port (a server WITHOUT one)"; exit 1; }
-	@REDIS_ADDR=$(REDIS_ADDR) REDIS_ADDR_NO_ACLFILE=$(REDIS_ADDR_NO_ACLFILE) go test -tags live -count=1 ./...
+	@test -n "$(REDIS_ADDR)" || { echo "l1: set REDIS_ADDR=host:port (server WITH a config file and an aclfile)"; exit 1; }
+	@test -n "$(REDIS_ADDR_62)" || { echo "l1: set REDIS_ADDR_62=host:port (a Redis 6.2 server)"; exit 1; }
+	@test -n "$(REDIS_ADDR_NO_ACLFILE)" || { echo "l1: set REDIS_ADDR_NO_ACLFILE=host:port (server WITHOUT an aclfile)"; exit 1; }
+	@test -n "$(REDIS_ADDR_NOFILE)" || { echo "l1: set REDIS_ADDR_NOFILE=host:port (server WITHOUT a config file)"; exit 1; }
+	@REDIS_ADDR=$(REDIS_ADDR) REDIS_ADDR_62=$(REDIS_ADDR_62) \
+		REDIS_ADDR_NO_ACLFILE=$(REDIS_ADDR_NO_ACLFILE) REDIS_ADDR_NOFILE=$(REDIS_ADDR_NOFILE) \
+		go test -tags live -count=1 ./...
 
 fmt:
 	@gofmt -w .
