@@ -45,7 +45,9 @@ test:
 #                         `config` needs the first to run CONFIG REWRITE
 #   REDIS_ADDR_62         a Redis 6.2 server: no multi-parameter CONFIG SET, a
 #                         different reply shape for ACL GETUSER, a smaller
-#                         parameter set
+#                         parameter set. It needs no config file and no aclfile —
+#                         what is tested against it is the write path and the
+#                         version's own limits
 #   REDIS_ADDR_NO_ACLFILE a server with no aclfile, so ACL SAVE fails
 #   REDIS_ADDR_NOFILE     a server started with no config file, so CONFIG
 #                         REWRITE fails. One server can serve both of the last

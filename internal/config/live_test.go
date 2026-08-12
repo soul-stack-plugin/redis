@@ -268,6 +268,11 @@ func TestLiveOldServerFallsBack(t *testing.T) {
 
 	e := liveApply(t, "REDIS_ADDR_62", "present", map[string]any{
 		"settings": map[string]any{"maxmemory": "50mb", "maxmemory-policy": "allkeys-lru"},
+		// persist is off because the subject here is the write path, not
+		// durability. The 6.2 server is not required to have been started from a
+		// config file, and a CONFIG REWRITE failure would fail this test for a
+		// reason it is not testing.
+		"persist": false,
 	})
 	if e.GetFailed() {
 		t.Fatalf("apply: %s", e.GetMessage())
