@@ -181,11 +181,39 @@ func TestLiveCaseNormalisationReportsNoChange(t *testing.T) {
 	}
 }
 
-// Redis 7.0+ applies a multi-parameter CONFIG SET all-or-nothing. An immutable
-// parameter in the list must leave the mutable one untouched.
-func TestLiveMultiSetIsAtomic(t *testing.T) {
+// multiSetSupported asks the server rather than the version string: it writes
+// two parameters their own current values, which changes nothing, and looks at
+// whether the multi-argument form was refused for arity.
+//
+// Asking matters because the CI matrix runs a leg where the main server IS 6.2,
+// and a test that assumed 7.0+ there would fail for a reason that has nothing to
+// do with the module.
+func multiSetSupported(t *testing.T, env string) bool {
+	t.Helper()
+	c := liveClient(t, env)
+	cur := []setting{
+		{name: "maxmemory", value: liveGet(t, env, "maxmemory")},
+		{name: "maxmemory-policy", value: liveGet(t, env, "maxmemory-policy")},
+	}
+	err := c.Set(context.Background(), cur)
+	if err == nil {
+		return true
+	}
+	if isArityError(err) {
+		return false
+	}
+	t.Fatalf("probing for multi-parameter CONFIG SET: %v", err)
+	return false
+}
+
+// Redis 7.0+ applies a multi-parameter CONFIG SET all-or-nothing: an immutable
+// parameter in the list must leave the mutable one untouched. Where the form
+// does not exist, the module writes one at a time and the property under test is
+// the other one — that it says so instead of implying atomicity it did not have.
+func TestLiveMultiSetAtomicityMatchesTheServer(t *testing.T) {
 	liveSet(t, "REDIS_ADDR", "maxmemory", "0")
 	t.Cleanup(func() { liveSet(t, "REDIS_ADDR", "maxmemory", "0") })
+	atomicServer := multiSetSupported(t, "REDIS_ADDR")
 
 	e := liveApply(t, "REDIS_ADDR", "present", map[string]any{
 		"settings": map[string]any{"maxmemory": "50mb", "databases": "32"},
@@ -193,18 +221,28 @@ func TestLiveMultiSetIsAtomic(t *testing.T) {
 	if !e.GetFailed() {
 		t.Fatal("setting an immutable parameter was reported as success")
 	}
-	if got := liveGet(t, "REDIS_ADDR", "maxmemory"); got != "0" {
-		t.Errorf("maxmemory moved to %q despite the command being rejected as a unit", got)
+
+	if atomicServer {
+		if got := liveGet(t, "REDIS_ADDR", "maxmemory"); got != "0" {
+			t.Errorf("maxmemory moved to %q despite the command being rejected as a unit", got)
+		}
+		return
+	}
+	// Pre-7.0: the writes went out one at a time, so some may have landed. The
+	// module must not hide that.
+	if !strings.Contains(e.GetMessage(), "ARE applied") {
+		t.Errorf("on a server without an atomic multi-set the failure must say earlier writes landed: %s", e.GetMessage())
 	}
 }
 
-func TestLiveMultiSetSucceedsOnModernServer(t *testing.T) {
+func TestLiveAtomicFlagReportsWhatTheServerDid(t *testing.T) {
 	liveSet(t, "REDIS_ADDR", "maxmemory", "0")
 	liveSet(t, "REDIS_ADDR", "maxmemory-policy", "noeviction")
 	t.Cleanup(func() {
 		liveSet(t, "REDIS_ADDR", "maxmemory", "0")
 		liveSet(t, "REDIS_ADDR", "maxmemory-policy", "noeviction")
 	})
+	want := multiSetSupported(t, "REDIS_ADDR")
 
 	e := liveApply(t, "REDIS_ADDR", "present", map[string]any{
 		"settings": map[string]any{"maxmemory": "50mb", "maxmemory-policy": "allkeys-lru"},
@@ -212,8 +250,9 @@ func TestLiveMultiSetSucceedsOnModernServer(t *testing.T) {
 	if e.GetFailed() {
 		t.Fatalf("apply: %s", e.GetMessage())
 	}
-	if !e.GetOutput().GetFields()["atomic"].GetBoolValue() {
-		t.Error("atomic=false on a server that accepts the multi-parameter form")
+	if got := e.GetOutput().GetFields()["atomic"].GetBoolValue(); got != want {
+		t.Errorf("atomic=%v, but this server %s a multi-parameter CONFIG SET",
+			got, map[bool]string{true: "accepts", false: "rejects"}[want])
 	}
 }
 
@@ -349,7 +388,14 @@ func TestLiveReadRedactsSecret(t *testing.T) {
 	}
 }
 
-func TestLiveReadWildcardDiffersByVersion(t *testing.T) {
+// The parameter set grows with the version, which is why an unsupported
+// parameter has to fail rather than pass silently.
+//
+// The assertion is `not more` rather than `strictly fewer` on purpose: in CI the
+// matrix leg that runs 6.2 as the main server compares 6.2 against 6.2, and a
+// strict comparison would fail there for a reason that has nothing to do with
+// the module. What must never happen is the older server reporting MORE.
+func TestLiveReadWildcardCoversTheWholeParameterSet(t *testing.T) {
 	modern := liveApply(t, "REDIS_ADDR", "read", map[string]any{})
 	old := liveApply(t, "REDIS_ADDR_62", "read", map[string]any{})
 	for _, e := range []*pluginv1.ApplyEvent{modern, old} {
@@ -362,8 +408,13 @@ func TestLiveReadWildcardDiffersByVersion(t *testing.T) {
 	}
 	nModern := int(modern.GetOutput().GetFields()["count"].GetNumberValue())
 	nOld := int(old.GetOutput().GetFields()["count"].GetNumberValue())
-	if nOld >= nModern {
-		t.Errorf("6.2 reported %d parameters and the modern server %d; expected the older one to have fewer", nOld, nModern)
+	// A wildcard read that comes back nearly empty means the glob never reached
+	// the server, not that the server is small.
+	if nOld < 100 || nModern < 100 {
+		t.Errorf("a `*` read returned 6.2=%d modern=%d; both should be well over a hundred", nOld, nModern)
+	}
+	if nOld > nModern {
+		t.Errorf("6.2 reported %d parameters and the modern server %d; the older set cannot be the larger one", nOld, nModern)
 	}
 	t.Logf("parameters: 6.2=%d modern=%d", nOld, nModern)
 }
