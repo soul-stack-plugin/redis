@@ -1,0 +1,5 @@
+dist/
+
+# `go build ./...` writes the binary under the MODULE's last path element,
+# beside the sources. `make build` puts it in dist/ where it belongs.
+/redis
