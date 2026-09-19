@@ -40,17 +40,17 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # `go install .../sdk/cmd/soul-mod@v0.1.0-beta.1` does NOT work and cannot be made
-      # to: the published sdk module's own go.mod carries `replace ... => ../proto/plugin`,
-      # and Go refuses `install pkg@version` for any module whose go.mod has a replace.
-      # That relative path resolves only inside a full checkout, so build it from one.
-      - name: Build soul-mod from the core repository
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          git clone --depth 1 --branch sdk/v0.1.0-beta.1 \
-            https://github.com/souls-guild/soul-stack.git /tmp/soul-stack
-          cd /tmp/soul-stack && GOWORK= go build -o "$HOME/.local/bin/soul-mod" ./sdk/cmd/soul-mod
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: gofmt, vet, no-replace, test, build, stamp, verify
-        run: make check
+      # `make ci`, not `make check`, and the missing target is `schema`.
+      #
+      # That step needs `soul-mod`, which is built from souls-guild/soul-stack — a PRIVATE
+      # repository. There is no way to get the tool onto a public runner: `go install
+      # .../sdk/cmd/soul-mod@v0.1.0-beta.1` is refused because the published sdk module's
+      # own go.mod carries `replace ... => ../proto/plugin`, and cloning the core needs a
+      # credential this repository has not been given.
+      #
+      # ★ The document is still gated, one repository over: soul-stack vendors a copy of
+      # `schema.json` and its `check-plugin-schema` builds THIS artifact at a pinned commit,
+      # stamps it for real, and refuses unless the two are byte-identical. So a drift is
+      # caught there rather than here — later, but not never. Run `make check` locally.
+      - name: gofmt, vet, no-replace, test
+        run: make ci

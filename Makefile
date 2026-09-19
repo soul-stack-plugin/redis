@@ -63,5 +63,23 @@ schema: build ## schema.json is what `soul-mod stamp` derives from the Go value
 	@echo "schema: schema.json is what \`soul-mod stamp\` derives, and verify is green"
 
 .PHONY: check
-check: fmt vet no-replace test schema ## The whole gate
+check: fmt vet no-replace test schema ## The whole gate (needs soul-mod on PATH)
 	@echo "check: green"
+
+# ci — what a PUBLIC runner can actually run, which is everything but `schema`.
+#
+# `soul-mod` is built from souls-guild/soul-stack and that repository is PRIVATE, so a
+# runner here has no way to obtain the tool: `go install .../sdk/cmd/soul-mod@version` is
+# refused outright (the published sdk module's go.mod carries a `replace`), and cloning
+# the core needs a credential this repository does not have.
+#
+# ★ The schema document is NOT therefore unchecked. The core repository vendors a copy of
+# it and gates it in `check-plugin-schema`, which builds THIS artifact at a pinned commit,
+# runs the real `soul-mod stamp`, and refuses unless the two are byte-identical. That gate
+# runs in its `make check`. What is lost here is only the earlier warning, so run the full
+# `make check` locally before pushing a change to the bundle.
+.PHONY: ci
+ci: fmt vet no-replace test ## The gate minus `schema` — for runners with no access to the private core
+	@echo "ci: green — NOTE: 'schema' did not run (soul-mod needs the private core repo)."
+	@echo "ci: the document is gated by check-plugin-schema in soul-stack, against a pinned"
+	@echo "ci: commit of this repository. Run 'make check' locally before changing the bundle."

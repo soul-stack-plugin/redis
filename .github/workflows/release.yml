@@ -31,15 +31,31 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # `go install .../sdk/cmd/soul-mod@v0.1.0-beta.1` does NOT work and cannot be made
-      # to: the published sdk module's own go.mod carries `replace ... => ../proto/plugin`,
-      # and Go refuses `install pkg@version` for any module whose go.mod has a replace.
-      # That relative path resolves only inside a full checkout, so build it from one.
+      # A release CANNOT be cut without `soul-mod`: `make build` stamps the artifact, and an
+      # unstamped artifact carries no disclosure, so every keeper-side reader fails closed.
+      #
+      # The tool is built from souls-guild/soul-stack, which is PRIVATE. `go install
+      # .../sdk/cmd/soul-mod@version` is refused regardless (the published sdk module's
+      # go.mod carries `replace ... => ../proto/plugin`), so a full checkout of the core is
+      # the only source — and reaching it needs a credential.
+      #
+      # This fails with a NAMED reason rather than on git's credential prompt, which is what
+      # an unauthenticated clone produces: `could not read Username for https://github.com`
+      # says nothing about which repository or why.
       - name: Build soul-mod from the core repository
+        env:
+          CORE_TOKEN: ${{ secrets.SOUL_STACK_CORE_TOKEN }}
         run: |
+          if [ -z "$CORE_TOKEN" ]; then
+            echo "::error::soul-mod is built from souls-guild/soul-stack, which is private, and"
+            echo "::error::the SOUL_STACK_CORE_TOKEN secret (read access to it) is not set on this"
+            echo "::error::repository. Either set it, or cut the release from a workstation that has"
+            echo "::error::a core checkout: make build && make verify."
+            exit 1
+          fi
           mkdir -p "$HOME/.local/bin"
           git clone --depth 1 --branch sdk/v0.1.0-beta.1 \
-            https://github.com/souls-guild/soul-stack.git /tmp/soul-stack
+            "https://x-access-token:${CORE_TOKEN}@github.com/souls-guild/soul-stack.git" /tmp/soul-stack
           cd /tmp/soul-stack && GOWORK= go build -o "$HOME/.local/bin/soul-mod" ./sdk/cmd/soul-mod
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
