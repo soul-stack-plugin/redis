@@ -31,8 +31,17 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Install soul-mod
-        run: go install github.com/souls-guild/soul-stack/sdk/cmd/soul-mod@v0.1.0-beta.1
+      # `go install .../sdk/cmd/soul-mod@v0.1.0-beta.1` does NOT work and cannot be made
+      # to: the published sdk module's own go.mod carries `replace ... => ../proto/plugin`,
+      # and Go refuses `install pkg@version` for any module whose go.mod has a replace.
+      # That relative path resolves only inside a full checkout, so build it from one.
+      - name: Build soul-mod from the core repository
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          git clone --depth 1 --branch sdk/v0.1.0-beta.1 \
+            https://github.com/souls-guild/soul-stack.git /tmp/soul-stack
+          cd /tmp/soul-stack && GOWORK= go build -o "$HOME/.local/bin/soul-mod" ./sdk/cmd/soul-mod
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build and stamp
         run: make build
