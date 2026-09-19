@@ -31,6 +31,9 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Install soul-mod
+        run: go install github.com/souls-guild/soul-stack/sdk/cmd/soul-mod@v0.1.0-beta.1
+
       - name: Build and stamp
         run: make build
 
@@ -42,17 +45,17 @@ jobs:
 
       - name: Name the artifact and hash it
         run: |
-          bin="soul-mod-redis-linux-${{ matrix.arch }}"
-          mv dist/soul-mod-redis "$bin"
+          bin="redis-linux-${{ matrix.arch }}"
+          mv dist/redis "$bin"
           sha256sum "$bin" > "$bin.sha256"
           cat "$bin.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: soul-mod-redis-linux-${{ matrix.arch }}
+          name: redis-linux-${{ matrix.arch }}
           path: |
-            soul-mod-redis-linux-${{ matrix.arch }}
-            soul-mod-redis-linux-${{ matrix.arch }}.sha256
+            redis-linux-${{ matrix.arch }}
+            redis-linux-${{ matrix.arch }}.sha256
           if-no-files-found: error
 
       # The schema document is derived from Go values and carries nothing about
@@ -85,8 +88,8 @@ jobs:
         run: |
           ls -l assets
           for arch in amd64 arm64; do
-            test -s "assets/soul-mod-redis-linux-$arch" || { echo "missing artifact for $arch"; exit 1; }
-            (cd assets && sha256sum -c "soul-mod-redis-linux-$arch.sha256")
+            test -s "assets/redis-linux-$arch" || { echo "missing artifact for $arch"; exit 1; }
+            (cd assets && sha256sum -c "redis-linux-$arch.sha256")
           done
           test -s assets/schema.json
 
@@ -95,9 +98,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ github.ref_name }}" \
-            assets/soul-mod-redis-linux-amd64 \
-            assets/soul-mod-redis-linux-amd64.sha256 \
-            assets/soul-mod-redis-linux-arm64 \
-            assets/soul-mod-redis-linux-arm64.sha256 \
+            assets/redis-linux-amd64 \
+            assets/redis-linux-amd64.sha256 \
+            assets/redis-linux-arm64 \
+            assets/redis-linux-arm64.sha256 \
             assets/schema.json \
             --clobber

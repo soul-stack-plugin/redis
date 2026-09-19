@@ -1,64 +1,67 @@
-# Makefile for the soul-mod-redis bundle.
+# redis — the gate that used to live in soul-stack's `check-plugin-schema` now lives
+# beside the artifact it checks (NIM-868, following NIM-825).
 #
-# The artifact goes to dist/ and is stamped with its own schema. The name is no
-# longer load-bearing — keeper takes the single executable it finds in dist/ —
-# but stamping is: an unstamped artifact carries no disclosure, and a reader
-# that cannot read the disclosure fails closed rather than approving blind.
+# The plugin is its OWN Go module and depends on the core only through two published
+# ones (ADR-011): `sdk` and `proto/plugin`, by version and with no `replace`. That is
+# what makes this repository buildable on its own, and a `replace` creeping back in
+# is the one change that would quietly re-couple it to a checkout of soul-stack.
 #
-# SOUL_MOD defaults to running the tool out of the SDK the bundle already
-# depends on, so a fresh clone needs nothing installed. Point it at an installed
-# binary (go install github.com/souls-guild/soul-stack/sdk/cmd/soul-mod@latest)
-# to skip the compile on every invocation.
+# ★ soul-stack pins a commit of this repository and checks its own vendored
+# `examples/module/redis/schema.json` against what `soul-mod stamp` derives here. So
+# `schema` below is not only this repo's gate: a change that moves the document and
+# is not accompanied by a pin bump there turns soul-stack's `check-plugin-schema` red.
+.DEFAULT_GOAL := help
 
-BIN_DIR  := dist
-BINARY   := $(BIN_DIR)/soul-mod-redis
-SOUL_MOD ?= go run github.com/souls-guild/soul-stack/sdk/cmd/soul-mod
+BIN     := redis
+SOULMOD ?= soul-mod
 
-.PHONY: build verify test l1 fmt fmt-check vet check clean
+.PHONY: help
+help: ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
+	  awk 'BEGIN{FS=":.*?## "}{printf "%-18s %s\n", $$1, $$2}'
 
-# CGO_ENABLED=0 is not a micro-optimisation: `net` pulls in the cgo resolver by
-# default, and the resulting artifact is linked against the build host's libc.
-# An artifact that gets downloaded and run on a host nobody chose has to be
-# static — and a cross-compiled arm64 build is static anyway, so without this
-# the two released binaries would not even be the same kind of thing.
-build:
-	@mkdir -p $(BIN_DIR)
-	@CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY) ./cmd/soul-mod-redis
-	@$(SOUL_MOD) stamp $(BINARY)
+.PHONY: build
+build: ## Build the artifact into dist/ and stamp it
+	GOWORK=off go build -o dist/$(BIN) .
+	@$(SOULMOD) stamp dist/$(BIN) >/dev/null
 
-# The CI gate: the stamped schema must still match the code. A stale stamp is
-# worse than no stamp — everything downstream trusts it over the source it can
-# no longer see.
-verify:
-	@$(SOUL_MOD) verify $(BINARY)
+.PHONY: verify
+verify: ## Refuse an artifact whose trailer is absent or disagrees with dist/schema.json
+	@$(SOULMOD) verify dist/$(BIN) >/dev/null
+	@echo "verify: the artifact's trailer is readable and matches the document beside it"
 
-# -count=1 rather than a bare `go test`: a cached result is an answer about a
-# tree that may no longer be the one on disk.
-test:
-	@go test -count=1 ./...
+.PHONY: test
+test: ## Unit tests with the race detector
+	GOWORK=off go test -race -count=1 ./...
 
-# L1 against a real server. REDIS_ADDR is required on purpose: an integration
-# test that silently skips looks green and proves nothing.
-l1:
-	@test -n "$(REDIS_ADDR)" || { echo "l1: set REDIS_ADDR=host:port (a server WITH an aclfile)"; exit 1; }
-	@test -n "$(REDIS_ADDR_NO_ACLFILE)" || { echo "l1: set REDIS_ADDR_NO_ACLFILE=host:port (a server WITHOUT one)"; exit 1; }
-	@REDIS_ADDR=$(REDIS_ADDR) REDIS_ADDR_NO_ACLFILE=$(REDIS_ADDR_NO_ACLFILE) go test -tags live -count=1 ./...
+.PHONY: vet
+vet: ## go vet
+	GOWORK=off go vet ./...
 
-fmt:
-	@gofmt -w .
+.PHONY: fmt
+fmt: ## Refuse unformatted sources
+	@out=$$(GOWORK=off gofmt -l .); \
+	  if [ -n "$$out" ]; then echo "gofmt: $$out" >&2; exit 1; fi
 
-# `check` uses this and not `fmt`, because a gate that rewrites the tree it is
-# checking can never fail: run it in CI and every branch is formatted by
-# definition. This one only reports.
-fmt-check:
-	@out="$$(gofmt -l .)"; \
-	  if [ -n "$$out" ]; then echo "gofmt: not formatted:"; echo "$$out"; exit 1; fi
+.PHONY: no-replace
+no-replace: ## Refuse a `replace` in go.mod — it would re-couple this repo to a soul-stack checkout
+	@if grep -q '^replace' go.mod; then \
+	  echo "go.mod carries a replace directive. This repository depends on the core through" >&2; \
+	  echo "published sdk/proto-plugin versions only (ADR-011); a replace makes it buildable" >&2; \
+	  echo "only next to a soul-stack checkout, which is what moving it here undid." >&2; \
+	  exit 1; \
+	fi
+	@echo "no-replace: go.mod depends on published versions only"
 
-vet:
-	@go vet ./...
+.PHONY: schema
+schema: build ## schema.json is what `soul-mod stamp` derives from the Go value
+	@$(SOULMOD) verify dist/$(BIN) >/dev/null
+	@if ! diff -q dist/schema.json schema.json >/dev/null; then \
+	  echo "schema.json is NOT what the artifact publishes — re-run: $(SOULMOD) stamp dist/$(BIN)" >&2; \
+	  diff -u schema.json dist/schema.json | head -40 >&2; exit 1; \
+	fi
+	@echo "schema: schema.json is what \`soul-mod stamp\` derives, and verify is green"
 
-check: fmt-check vet test build verify
-	@echo "check: $(BINARY) ok"
-
-clean:
-	@rm -rf $(BIN_DIR)
+.PHONY: check
+check: fmt vet no-replace test schema ## The whole gate
+	@echo "check: green"
